@@ -14,7 +14,7 @@ use uuid::Uuid;
 const TURNS_BEFORE_THE_OPERATOR: usize = 12;
 
 use crate::{
-    agent::AgentWindow,
+    agent::{AgentError, AgentWindow},
     task::{
         IsolationError, Task, TaskAgentRun, TaskAgentRunOutcome, TaskAskAuthor, TaskAskKind,
         TaskError, TaskExecutionMode, TaskExecutionPauseReason, TaskExecutionStatus,
@@ -199,7 +199,7 @@ where
         let engine = self.engine(&task)?;
         let conversation_id = self.agent_conversation(&task, true).await?;
         let command = engine.autopilot_command(
-            &conversation_id,
+            conversation_id.as_deref(),
             prompt,
             &self.turn_context(&task, TaskExecutionMode::Autopilot),
             true,
@@ -264,11 +264,17 @@ where
         let engine = self.engine(&task)?;
         let conversation_id = self
             .agent_conversation(&task, engine.operator_requires_conversation())
-            .await?;
+            .await?
+            .ok_or_else(|| {
+                TaskServiceError::Agent(AgentError::new(
+                    "the task has no conversation to take over",
+                ))
+            })?;
         let command = engine.operator_command(
             &conversation_id,
             "altitude: the operator has taken this task over and will speak to you \
              directly from here. They are at the terminal now.",
+            &self.turn_context(&task, TaskExecutionMode::Operator),
         );
         let mut bound = None;
         let command = match task.facts.sandbox_id.as_deref() {
@@ -371,6 +377,7 @@ where
                 TaskHistoryEvent::AgentRunStarted { .. }
                 | TaskHistoryEvent::AgentRunEnded { .. }
                 | TaskHistoryEvent::AgentModelObserved { .. }
+                | TaskHistoryEvent::AgentConversationStarted { .. }
                 | TaskHistoryEvent::AgentUsageReported { .. }
                 | TaskHistoryEvent::TrackerSynced { .. }
                 | TaskHistoryEvent::ExecutionRecovered { .. } => continue,

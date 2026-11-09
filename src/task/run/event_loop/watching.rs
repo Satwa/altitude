@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::{
     agent::{AgentRefusal, TaskStreamDecoder},
-    isolation::{CommandEvent, CommandSession, IsolationEngine},
+    isolation::{Command, CommandEvent, CommandSession, IsolationEngine, OutputStream},
     task::mirror::review::Look,
     task::{
         Task, TaskAgentRun, TaskExecutionMode, TaskExecutionPauseReason, TaskHistoryEvent,
@@ -51,6 +51,8 @@ where
         let current_activity = Arc::clone(&self.current_activity);
         let event_loop = self.clone();
         tokio::spawn(async move {
+            let mut task = task;
+            let mut conversation_failure = None;
             let mut stream = match mode {
                 TaskExecutionMode::Autopilot => service.stream_decoder(&task),
                 _ => None,
@@ -71,9 +73,23 @@ where
                         bytes,
                     } => {
                         if let Some(decoder) = &mut stream {
-                            decoder.process(&bytes);
+                            if matches!(output, OutputStream::Stdout) {
+                                decoder.process(&bytes);
+                            } else {
+                                decoder.process_stderr(&bytes);
+                            }
+                            if let Some(conversation_id) = decoder.take_conversation_id() {
+                                match service.record_conversation(&task, &conversation_id).await {
+                                    Ok(recorded) => task = recorded,
+                                    Err(error) => {
+                                        let _ = session.commands.send(Command::Interrupt);
+                                        conversation_failure = Some(error.to_string());
+                                    }
+                                }
+                            }
                         }
                         if let Some(decoder) = &mut progress
+                            && matches!(output, OutputStream::Stdout)
                             && let Some(activity) = {
                                 decoder.process(&bytes);
                                 decoder.take_activity()
@@ -102,7 +118,13 @@ where
                         let suspending = event_loop
                             .take_active_run(&task.id)
                             .is_some_and(|active| active.suspending);
-                        let control = event_loop.take_control_request(&task.id, &run.id);
+                        let mut control = event_loop.take_control_request(&task.id, &run.id);
+                        let event = if let Some(error) = conversation_failure.take() {
+                            control = None;
+                            CommandEvent::Failed(error)
+                        } else {
+                            event
+                        };
                         service.release_ports(&task);
                         if suspending {
                             tracing::debug!(task_id = %task.id, "command ended during intentional suspension");
@@ -285,7 +307,11 @@ where
             }
             return Ok(());
         }
-        if !matches!(event, CommandEvent::Exited(0)) {
+        let failure = stream
+            .as_mut()
+            .and_then(|decoder| decoder.failure_message())
+            .map(str::to_owned);
+        if !matches!(event, CommandEvent::Exited(0)) || failure.is_some() {
             let refusal = stream.as_mut().and_then(|decoder| decoder.refusal());
             // A window that reopens on its own is the one ending that is not a
             // failure: the task keeps its place, and comes back when the clock runs
@@ -314,11 +340,7 @@ where
                 Some(AgentRefusal::Stopped { said }) => Some(said.as_str()),
                 _ => None,
             };
-            let diagnostic = said.or_else(|| {
-                stream
-                    .as_mut()
-                    .and_then(|decoder| decoder.failure_message())
-            });
+            let diagnostic = said.or(failure.as_deref());
             let result = self.service.finish(&task, run, event, diagnostic).await;
             let _ = self
                 .events

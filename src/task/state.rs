@@ -410,6 +410,9 @@ pub enum TaskHistoryEvent {
     AgentModelObserved {
         model: String,
     },
+    AgentConversationStarted {
+        agent_conversation_id: String,
+    },
     TaskInputExpressed {
         input: TaskInput,
     },

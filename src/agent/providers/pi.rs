@@ -1,6 +1,6 @@
 use crate::agent::{
-    AUTOPILOT_SYSTEM_PROMPT, Activity, AgentEngine, AgentKind, AgentUsage, TaskProgressDecoder,
-    TaskStreamDecoder, TaskUsage, activity, system_prompt,
+    AUTOPILOT_SYSTEM_PROMPT, Activity, AgentEngine, AgentKind, AgentUsage, ConversationState,
+    TaskProgressDecoder, TaskStreamDecoder, TaskUsage, activity, system_prompt,
 };
 use crate::isolation::{
     DefaultFile, GuestPath, PersistentDirectory, ProfileRecipe, SignInCommand, shell_quote,
@@ -38,6 +38,12 @@ const DEFAULT_MCP: &str = r#"{
 
 #[derive(Clone)]
 pub struct PiCode;
+
+impl PiCode {
+    fn conversation_transcript_path(&self, conversation_id: &str) -> String {
+        format!("/altitude/pi/sessions/{conversation_id}.jsonl")
+    }
+}
 
 pub struct PiStream {
     pending: String,
@@ -228,11 +234,12 @@ impl TaskProgressDecoder for PiProgress {
 impl AgentEngine for PiCode {
     fn autopilot_command(
         &self,
-        conversation_id: &str,
+        conversation_id: Option<&str>,
         prompt: &str,
         context: &TaskAgentTurnContext,
         _resume: bool,
     ) -> String {
+        let conversation_id = conversation_id.expect("Pi's session ID is assigned at creation");
         // Pi creates the session file when it is absent and continues it when it
         // exists, so a work turn does not distinguish the two.
         format!(
@@ -246,7 +253,12 @@ impl AgentEngine for PiCode {
         )
     }
 
-    fn operator_command(&self, conversation_id: &str, opening: &str) -> String {
+    fn operator_command(
+        &self,
+        conversation_id: &str,
+        opening: &str,
+        _context: &TaskAgentTurnContext,
+    ) -> String {
         // The message is a positional one, so the session resumes with it as the first
         // thing the agent reads: no keystrokes into a terminal that is not ours.
         format!(
@@ -309,11 +321,11 @@ impl AgentEngine for PiCode {
         }
     }
 
-    fn new_conversation_id(&self) -> String {
-        Uuid::new_v4().to_string()
+    fn new_conversation_id(&self) -> Option<String> {
+        Some(Uuid::new_v4().to_string())
     }
 
-    fn conversation_transcript_path(&self, conversation_id: &str) -> String {
-        format!("/altitude/pi/sessions/{conversation_id}.jsonl")
+    fn conversation_state(&self, conversation_id: &str) -> ConversationState {
+        ConversationState::File(self.conversation_transcript_path(conversation_id))
     }
 }

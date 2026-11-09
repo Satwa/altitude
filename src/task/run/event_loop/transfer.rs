@@ -190,31 +190,15 @@ where
                 .await
                 .map_err(TaskServiceError::Isolation)?;
         }
-        if let (Some(conversation), Some(kind)) =
-            (&task.facts.agent_conversation_id, task.agent_kind)
-        {
-            let guest = self
-                .service
-                .agents
-                .engine(kind)
-                .conversation_transcript_path(conversation);
-            // A conversation that has not written a transcript yet has nothing to
-            // carry, and a move must not fail over the file it was never given: a
-            // task that failed before its first turn still has work worth taking.
-            // Asked of the filesystem rather than by running a program in there: the
-            // guest is the agent's to have broken, and a task is not better off for
-            // having its conversation left behind because `test` went missing.
-            let exists = isolation
-                .guest_regular_file_exists(sandbox_id.clone(), guest.clone())
-                .await
-                .map_err(TaskServiceError::Isolation)?;
-            if exists {
-                isolation
-                    .collect_file(sandbox_id, guest, destination.join(TRANSCRIPT_FILE))
-                    .await
-                    .map_err(TaskServiceError::Isolation)?;
-            }
-        }
+        self.service
+            .collect_conversation(
+                isolation,
+                task,
+                &sandbox_id,
+                &destination.join(TRANSCRIPT_FILE),
+                progress,
+            )
+            .await?;
         Ok(())
     }
 

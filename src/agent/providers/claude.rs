@@ -1,7 +1,7 @@
 use crate::agent::{
     AUTOPILOT_SYSTEM_PROMPT, Activity, AgentEngine, AgentKind, AgentRefusal, AgentStanding,
-    AgentUsage, AgentWindow, AgentWindowReading, TaskProgressDecoder, TaskStreamDecoder, TaskUsage,
-    activity, system_prompt,
+    AgentUsage, AgentWindow, AgentWindowReading, ConversationState, TaskProgressDecoder,
+    TaskStreamDecoder, TaskUsage, activity, system_prompt,
 };
 use crate::isolation::{
     DefaultFile, GuestPath, PersistentDirectory, ProfileRecipe, SignInCommand, shell_quote,
@@ -365,11 +365,12 @@ impl TaskProgressDecoder for ClaudeProgress {
 impl AgentEngine for ClaudeCode {
     fn autopilot_command(
         &self,
-        conversation_id: &str,
+        conversation_id: Option<&str>,
         prompt: &str,
         context: &TaskAgentTurnContext,
         resume: bool,
     ) -> String {
+        let conversation_id = conversation_id.expect("Claude's session ID is assigned at creation");
         let session = if resume {
             format!("--resume {}", shell_quote(conversation_id))
         } else {
@@ -390,7 +391,12 @@ impl AgentEngine for ClaudeCode {
         )
     }
 
-    fn operator_command(&self, conversation_id: &str, opening: &str) -> String {
+    fn operator_command(
+        &self,
+        conversation_id: &str,
+        opening: &str,
+        _context: &TaskAgentTurnContext,
+    ) -> String {
         format!(
             "exec claude --permission-mode auto --resume {} {}",
             shell_quote(conversation_id),
@@ -469,12 +475,14 @@ impl AgentEngine for ClaudeCode {
         }
     }
 
-    fn new_conversation_id(&self) -> String {
-        Uuid::new_v4().to_string()
+    fn new_conversation_id(&self) -> Option<String> {
+        Some(Uuid::new_v4().to_string())
     }
 
-    fn conversation_transcript_path(&self, conversation_id: &str) -> String {
-        format!("/altitude/claude/projects/-/{conversation_id}.jsonl")
+    fn conversation_state(&self, conversation_id: &str) -> ConversationState {
+        ConversationState::File(format!(
+            "/altitude/claude/projects/-/{conversation_id}.jsonl"
+        ))
     }
 }
 

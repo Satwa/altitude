@@ -15,16 +15,17 @@ mod providers;
 pub mod tool;
 mod usage;
 pub use limits::{AgentRefusal, AgentStanding, AgentWindow, AgentWindowReading};
-use providers::{ClaudeCode, PiCode};
+use providers::{ClaudeCode, CodexCode, PiCode};
 pub use usage::{AgentUsage, TaskUsage};
 
-pub const AGENTS: [AgentKind; 2] = [AgentKind::Pi, AgentKind::Claude];
+pub const AGENTS: [AgentKind; 3] = [AgentKind::Pi, AgentKind::Claude, AgentKind::Codex];
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Type, Serialize, Deserialize)]
 #[sqlx(type_name = "TEXT", rename_all = "lowercase")]
 #[serde(rename_all = "lowercase")]
 pub enum AgentKind {
     Claude,
+    Codex,
     #[default]
     Pi,
 }
@@ -41,9 +42,10 @@ impl FromStr for AgentKind {
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value.trim().to_ascii_lowercase().as_str() {
             "claude" => Ok(Self::Claude),
+            "codex" => Ok(Self::Codex),
             "pi" => Ok(Self::Pi),
             _ => Err(AgentError::new(format!(
-                "unknown agent harness {value:?}; use claude or pi"
+                "unknown agent harness {value:?}; use claude, codex or pi"
             ))),
         }
     }
@@ -189,18 +191,40 @@ fn system_prompt(base: &str, context: &TaskAgentTurnContext) -> String {
     prompt
 }
 
+pub enum ConversationState {
+    File(String),
+    Directories {
+        required_file: &'static str,
+        paths: &'static [&'static str],
+    },
+}
+
+impl ConversationState {
+    pub fn required_file(&self) -> &str {
+        match self {
+            Self::File(path) => path,
+            Self::Directories { required_file, .. } => required_file,
+        }
+    }
+}
+
 pub trait AgentEngine: Send + Sync {
     fn profile_recipe(&self) -> ProfileRecipe;
-    fn new_conversation_id(&self) -> String;
-    fn conversation_transcript_path(&self, conversation_id: &str) -> String;
+    fn new_conversation_id(&self) -> Option<String>;
+    fn conversation_state(&self, conversation_id: &str) -> ConversationState;
     fn autopilot_command(
         &self,
-        conversation_id: &str,
+        conversation_id: Option<&str>,
         prompt: &str,
         context: &TaskAgentTurnContext,
         resume: bool,
     ) -> String;
-    fn operator_command(&self, conversation_id: &str, opening: &str) -> String;
+    fn operator_command(
+        &self,
+        conversation_id: &str,
+        opening: &str,
+        context: &TaskAgentTurnContext,
+    ) -> String;
     fn operator_requires_conversation(&self) -> bool;
     // The totals already recorded, for a harness whose own numbers are cumulative and
     // have to be turned into a delta before anyone can add them up.
@@ -214,7 +238,11 @@ pub trait AgentEngine: Send + Sync {
 
 pub trait TaskStreamDecoder: Send {
     fn process(&mut self, bytes: &[u8]);
+    fn process_stderr(&mut self, _bytes: &[u8]) {}
     fn failure_message(&mut self) -> Option<&str>;
+    fn take_conversation_id(&mut self) -> Option<String> {
+        None
+    }
     // The model the run was served by, as the harness named it.
     fn take_model(&mut self) -> Option<String> {
         None
@@ -248,6 +276,7 @@ pub trait TaskProgressDecoder: Send {
 #[derive(Clone)]
 pub struct AgentEngines {
     claude: ClaudeCode,
+    codex: CodexCode,
     pi: PiCode,
 }
 
@@ -255,6 +284,7 @@ impl AgentEngines {
     pub fn new() -> Self {
         Self {
             claude: ClaudeCode,
+            codex: CodexCode,
             pi: PiCode,
         }
     }
@@ -262,6 +292,7 @@ impl AgentEngines {
     pub fn engine(&self, kind: AgentKind) -> &dyn AgentEngine {
         match kind {
             AgentKind::Claude => &self.claude,
+            AgentKind::Codex => &self.codex,
             AgentKind::Pi => &self.pi,
         }
     }

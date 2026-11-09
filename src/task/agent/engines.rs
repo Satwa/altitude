@@ -8,40 +8,80 @@ use std::path::PathBuf;
 use crate::task::memory;
 use crate::task::{
     AgentError, ProjectMemoryFile, Task, TaskAgentTurnContext, TaskError, TaskExecutionMode,
-    TaskService, TaskServiceError,
+    TaskHistoryEvent, TaskService, TaskServiceError,
 };
 
 impl<E> TaskService<E>
 where
     E: IsolationEngine + Clone + 'static,
 {
+    pub(crate) async fn record_conversation(
+        &self,
+        task: &Task,
+        conversation_id: &str,
+    ) -> Result<Task, TaskServiceError> {
+        match task.facts.agent_conversation_id.as_deref() {
+            Some(recorded) if recorded == conversation_id => Ok(task.clone()),
+            Some(_) => Err(TaskServiceError::Agent(AgentError::new(
+                "the agent resumed a different conversation",
+            ))),
+            None => {
+                self.record(
+                    &task.id,
+                    &[TaskHistoryEvent::AgentConversationStarted {
+                        agent_conversation_id: conversation_id.to_owned(),
+                    }],
+                )
+                .await
+            }
+        }
+    }
+
     pub(crate) async fn agent_conversation(
         &self,
         task: &Task,
-        require_transcript: bool,
-    ) -> Result<String, TaskServiceError> {
+        require_state: bool,
+    ) -> Result<Option<String>, TaskServiceError> {
         let kind = self.agent_kind(task)?;
         let Some(conversation_id) = task.facts.agent_conversation_id.as_deref() else {
+            if !require_state && self.agents.engine(kind).new_conversation_id().is_none() {
+                return Ok(None);
+            }
             return self
                 .conversation_failure(task, format!("{kind} task has no conversation ID"))
                 .await;
         };
-        if !require_transcript {
-            return Ok(conversation_id.to_owned());
+        if !require_state {
+            return Ok(Some(conversation_id.to_owned()));
         }
-        let transcript_path = self
-            .agents
-            .engine(kind)
-            .conversation_transcript_path(conversation_id);
+        let state = self.agents.engine(kind).conversation_state(conversation_id);
         let sandbox_id = task
             .facts
             .sandbox_id
             .clone()
             .ok_or(TaskServiceError::Task(TaskError::MissingSandbox))?;
-        match self.isolation.guest_regular_file_exists(sandbox_id, transcript_path).await {
-            Ok(true) => Ok(conversation_id.to_owned()),
-            Ok(false) => self.conversation_failure(task, format!("{kind} conversation transcript is missing; the task cannot resume without its session state")).await,
-            Err(error) => self.conversation_failure(task, format!("could not read {kind} conversation transcript: {error}")).await,
+        match self
+            .isolation
+            .guest_regular_file_exists(sandbox_id, state.required_file().to_owned())
+            .await
+        {
+            Ok(true) => Ok(Some(conversation_id.to_owned())),
+            Ok(false) => {
+                self.conversation_failure(
+                    task,
+                    format!(
+                        "{kind} conversation state is missing; the task cannot resume without it"
+                    ),
+                )
+                .await
+            }
+            Err(error) => {
+                self.conversation_failure(
+                    task,
+                    format!("could not read {kind} conversation state: {error}"),
+                )
+                .await
+            }
         }
     }
     // What a turn is told about this task. The login belongs to the project's

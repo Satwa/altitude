@@ -43,7 +43,7 @@ where
             host: self.identity.label.clone(),
             agent_kind: Some(agent),
             agent_conversation_id: conversation
-                .or_else(|| Some(self.agents.engine(agent).new_conversation_id())),
+                .or_else(|| self.agents.engine(agent).new_conversation_id()),
         }
     }
 
@@ -160,7 +160,7 @@ where
                     }
                 });
                 engine.autopilot_command(
-                    &conversation_id,
+                    conversation_id.as_deref(),
                     &prompt,
                     &self.turn_context(&task, TaskExecutionMode::Autopilot),
                     resume,
@@ -375,14 +375,15 @@ where
             task.agent_kind,
             task.facts.agent_conversation_id.as_deref(),
         ) {
-            let guest = self
-                .agents
-                .engine(kind)
-                .conversation_transcript_path(conversation);
-            isolation
-                .deliver_file(sandbox_id.to_owned(), transcript, guest)
-                .await
-                .map_err(TaskServiceError::Isolation)?;
+            self.deliver_conversation(
+                isolation,
+                sandbox_id,
+                kind,
+                conversation,
+                &transcript,
+                progress,
+            )
+            .await?;
         }
         // The arrivals are the only copy of what came off the other machine, so they
         // are dropped once they are in the sandbox and not before.
